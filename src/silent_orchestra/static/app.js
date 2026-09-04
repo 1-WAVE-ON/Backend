@@ -83,6 +83,26 @@ const post = (path, body = {}) => request(path, {
   body: JSON.stringify(body),
 });
 
+// Disable the given controls while `task` runs. A control the task marked with
+// its own data-state (e.g. "error") keeps it.
+async function withBusy(controls, task) {
+  const buttons = [...controls];
+  buttons.forEach((button) => {
+    button.disabled = true;
+    button.dataset.state = "loading";
+    button.setAttribute("aria-busy", "true");
+  });
+  try {
+    return await task();
+  } finally {
+    buttons.forEach((button) => {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      if (button.dataset.state === "loading") button.removeAttribute("data-state");
+    });
+  }
+}
+
 function showToast(message) {
   const toast = byId("toast");
   toast.textContent = message;
@@ -139,55 +159,50 @@ async function observeGesture(button) {
   lastGestureButton = button;
   all(".gesture-button").forEach((item) => item.classList.remove("active"));
   button.classList.add("active");
-  button.disabled = true;
-  button.dataset.state = "loading";
-  button.setAttribute("aria-busy", "true");
   setAgentState(
     "listening",
     "동작을 관찰하고 있어요",
     "모션 특징과 현재 상황만 분석합니다. 원본 프레임은 저장하지 않습니다.",
   );
 
-  try {
-    const context = contextDefinitions[currentContext];
-    const result = await post("/observe", {
-      user_id: USER_ID,
-      context: {
-        active_app: context.app,
-        activity: currentContext,
-        space: context.space,
-        device: "laptop",
-      },
-      gesture: { motion_type: motion, direction, duration_ms: 430 },
-      attempt_inference: true,
-    });
-    lastObservation = result.observation;
+  await withBusy([button], async () => {
+    try {
+      const context = contextDefinitions[currentContext];
+      const result = await post("/observe", {
+        user_id: USER_ID,
+        context: {
+          active_app: context.app,
+          activity: currentContext,
+          space: context.space,
+          device: "laptop",
+        },
+        gesture: { motion_type: motion, direction, duration_ms: 430 },
+        attempt_inference: true,
+      });
+      lastObservation = result.observation;
 
-    if (result.inference.matched) {
-      lastExecution = result.inference.execution;
-      setAgentState("success", intentLabel(result.inference.intent), result.inference.reason);
-      showActionOverlay(result.inference);
-      lastObservation = null;
-      updateTeachingCard("자동 실행 완료", "Agent가 현재 맥락과 개인 기억을 바탕으로 의도를 추론했습니다.");
-    } else {
-      setAgentState(
-        "",
-        "다음 행동을 알려주세요",
-        "몸짓 직후 실제로 하려던 행동을 선택하면 반복 패턴을 학습합니다.",
-      );
-      updateTeachingCard(`${lastGestureLabel} 관찰 완료`, "이 몸짓 직후 사용자가 한 행동을 선택해 주세요.");
-      renderActionButtons();
+      if (result.inference.matched) {
+        lastExecution = result.inference.execution;
+        setAgentState("success", intentLabel(result.inference.intent), result.inference.reason);
+        showActionOverlay(result.inference);
+        lastObservation = null;
+        updateTeachingCard("자동 실행 완료", "Agent가 현재 맥락과 개인 기억을 바탕으로 의도를 추론했습니다.");
+      } else {
+        setAgentState(
+          "",
+          "다음 행동을 알려주세요",
+          "몸짓 직후 실제로 하려던 행동을 선택하면 반복 패턴을 학습합니다.",
+        );
+        updateTeachingCard(`${lastGestureLabel} 관찰 완료`, "이 몸짓 직후 사용자가 한 행동을 선택해 주세요.");
+        renderActionButtons();
+      }
+      await refreshDashboard();
+    } catch (error) {
+      showToast(`관찰 실패: ${error.message}`);
+      button.dataset.state = "error";
+      setAgentState("", "다시 시도해 주세요", "API 연결 상태와 서버 로그를 확인해 주세요.");
     }
-    await refreshDashboard();
-  } catch (error) {
-    showToast(`관찰 실패: ${error.message}`);
-    button.dataset.state = "error";
-    setAgentState("", "다시 시도해 주세요", "API 연결 상태와 서버 로그를 확인해 주세요.");
-  } finally {
-    button.disabled = false;
-    button.removeAttribute("aria-busy");
-    if (button.dataset.state === "loading") button.removeAttribute("data-state");
-  }
+  });
 }
 
 function updateTeachingCard(title, description) {
@@ -197,75 +212,56 @@ function updateTeachingCard(title, description) {
 
 async function teachAction(intent, target) {
   if (!lastObservation) return;
-  all(".action-button").forEach((button) => {
-    button.disabled = true;
-    button.dataset.state = "loading";
-    button.setAttribute("aria-busy", "true");
-  });
-  try {
-    const result = await post("/teach", {
-      user_id: USER_ID,
-      observation_id: lastObservation.id,
-      action_type: intent,
-      target,
-      parameters: {},
-    });
-    const label = intentLabel(intent);
-    updateTeachingCard(
-      `학습 진행 ${result.progress_current}/${result.progress_required}`,
-      `${lastGestureLabel} → ${label} 연결성을 관찰했습니다.`,
-    );
-    setAgentState(
-      "",
-      `패턴을 학습하고 있어요 / ${result.progress_current}/${result.progress_required}`,
-      "같은 상황에서 행동이 반복되면 먼저 제안하고, 승인 후에만 자동 실행합니다.",
-    );
-    if (result.suggestion?.status === "PENDING") {
-      showToast("새로운 패턴을 발견했습니다. 기억 여부를 확인해 주세요.");
+  await withBusy(all(".action-button"), async () => {
+    try {
+      const result = await post("/teach", {
+        user_id: USER_ID,
+        observation_id: lastObservation.id,
+        action_type: intent,
+        target,
+        parameters: {},
+      });
+      const label = intentLabel(intent);
+      updateTeachingCard(
+        `학습 진행 ${result.progress_current}/${result.progress_required}`,
+        `${lastGestureLabel} → ${label} 연결성을 관찰했습니다.`,
+      );
+      setAgentState(
+        "",
+        `패턴을 학습하고 있어요 / ${result.progress_current}/${result.progress_required}`,
+        "같은 상황에서 행동이 반복되면 먼저 제안하고, 승인 후에만 자동 실행합니다.",
+      );
+      if (result.suggestion?.status === "PENDING") {
+        showToast("새로운 패턴을 발견했습니다. 기억 여부를 확인해 주세요.");
+      }
+      lastObservation = null;
+      renderActionButtons();
+      await refreshDashboard();
+    } catch (error) {
+      showToast(`학습 실패: ${error.message}`);
     }
-    lastObservation = null;
-    renderActionButtons();
-    await refreshDashboard();
-  } catch (error) {
-    showToast(`학습 실패: ${error.message}`);
-  } finally {
-    all(".action-button").forEach((button) => {
-      button.disabled = false;
-      button.removeAttribute("data-state");
-      button.removeAttribute("aria-busy");
-    });
-  }
+  });
 }
 
 async function respondSuggestion(id, decision, modifiedIntent = null) {
-  const controls = all("[data-decision]");
-  controls.forEach((button) => {
-    button.disabled = true;
-    button.dataset.state = "loading";
-    button.setAttribute("aria-busy", "true");
-  });
-  try {
-    await post(`/suggestions/${id}/respond`, {
-      decision,
-      ...(modifiedIntent ? { modified_intent: modifiedIntent } : {}),
-    });
-    if (decision === "ACCEPTED" || decision === "MODIFIED") {
-      setAgentState(
-        "success",
-        "새로운 몸짓 언어를 기억했어요",
-        "이제 같은 상황에서 이 몸짓을 사용하면 Agent가 자동으로 실행합니다.",
-      );
+  await withBusy(all("[data-decision]"), async () => {
+    try {
+      await post(`/suggestions/${id}/respond`, {
+        decision,
+        ...(modifiedIntent ? { modified_intent: modifiedIntent } : {}),
+      });
+      if (decision === "ACCEPTED" || decision === "MODIFIED") {
+        setAgentState(
+          "success",
+          "새로운 몸짓 언어를 기억했어요",
+          "이제 같은 상황에서 이 몸짓을 사용하면 Agent가 자동으로 실행합니다.",
+        );
+      }
+      await refreshDashboard();
+    } catch (error) {
+      showToast(`제안 처리 실패: ${error.message}`);
     }
-    await refreshDashboard();
-  } catch (error) {
-    showToast(`제안 처리 실패: ${error.message}`);
-  } finally {
-    controls.forEach((button) => {
-      button.disabled = false;
-      button.removeAttribute("data-state");
-      button.removeAttribute("aria-busy");
-    });
-  }
+  });
 }
 
 function showActionOverlay(inference) {
@@ -285,29 +281,19 @@ function closeActionOverlay() {
 
 async function submitFeedback(type) {
   if (!lastExecution) return;
-  const controls = all("[data-feedback]");
-  controls.forEach((button) => {
-    button.disabled = true;
-    button.dataset.state = "loading";
-    button.setAttribute("aria-busy", "true");
+  await withBusy(all("[data-feedback]"), async () => {
+    try {
+      await post(`/executions/${lastExecution.id}/feedback`, {
+        user_id: USER_ID,
+        feedback_type: type,
+      });
+      closeActionOverlay();
+      lastExecution = null;
+      await refreshDashboard();
+    } catch (error) {
+      showToast(`피드백 실패: ${error.message}`);
+    }
   });
-  try {
-    await post(`/executions/${lastExecution.id}/feedback`, {
-      user_id: USER_ID,
-      feedback_type: type,
-    });
-    closeActionOverlay();
-    lastExecution = null;
-    await refreshDashboard();
-  } catch (error) {
-    showToast(`피드백 실패: ${error.message}`);
-  } finally {
-    controls.forEach((button) => {
-      button.disabled = false;
-      button.removeAttribute("data-state");
-      button.removeAttribute("aria-busy");
-    });
-  }
 }
 
 function renderSuggestions(suggestions, candidates) {
@@ -412,31 +398,26 @@ async function refreshDashboard() {
 
 async function resetDemo() {
   const button = byId("resetButton");
-  button.disabled = true;
-  button.dataset.state = "loading";
-  button.setAttribute("aria-busy", "true");
   button.textContent = "초기화 중…";
-  try {
-    await post("/demo/reset");
-    lastObservation = null;
-    lastExecution = null;
-    updateTeachingCard("먼저 몸짓을 발생시켜 주세요", "학습 전에는 아무 동작도 자동 실행하지 않습니다.");
-    setAgentState(
-      "",
-      "몸짓을 자연스럽게\n사용해 보세요",
-      "별도의 제스처를 외울 필요가 없습니다. AI가 반복되는 행동과 맥락을 관찰합니다.",
-    );
-    renderActionButtons();
-    await refreshDashboard();
-  } catch (error) {
-    showToast(`초기화 실패: ${error.message}`);
-    button.dataset.state = "error";
-  } finally {
-    button.disabled = false;
-    button.removeAttribute("aria-busy");
-    if (button.dataset.state === "loading") button.removeAttribute("data-state");
-    button.textContent = "초기화";
-  }
+  await withBusy([button], async () => {
+    try {
+      await post("/demo/reset");
+      lastObservation = null;
+      lastExecution = null;
+      updateTeachingCard("먼저 몸짓을 발생시켜 주세요", "학습 전에는 아무 동작도 자동 실행하지 않습니다.");
+      setAgentState(
+        "",
+        "몸짓을 자연스럽게\n사용해 보세요",
+        "별도의 제스처를 외울 필요가 없습니다. AI가 반복되는 행동과 맥락을 관찰합니다.",
+      );
+      renderActionButtons();
+      await refreshDashboard();
+    } catch (error) {
+      showToast(`초기화 실패: ${error.message}`);
+      button.dataset.state = "error";
+    }
+  });
+  button.textContent = "초기화";
 }
 
 async function init() {
