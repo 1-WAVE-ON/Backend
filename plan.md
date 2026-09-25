@@ -1,44 +1,88 @@
 # PLAN — SilentOrchestra 2.0
 
-## 구현 방향
+[요구사항](spec.md)을 구현하기 위한 구조·실행 설정·검증 방법입니다.
 
-- 루트의 `backend/`에 Python 패키지·테스트·SQL·스크립트를, `frontend/`에 HTML·CSS·JS를 둔다. FastAPI가 프론트 정적 파일을 제공하며 별도 빌드 도구는 사용하지 않는다. 공통 문서·`.env`·`data/`와 실행 진입점 `run_demo.py`는 루트에 유지한다.
+## 구현 구조
 
-- FastAPI(도메인 엔드포인트 8개 + demo/health), 단일 페이지 워크벤치, 로컬 SQLite를 사용한다. 구조·코드 지도는 [architecture](docs/architecture.md), 설정은 [config.py](backend/src/silent_orchestra/config.py)(`SO_DATABASE_URL` 기본 로컬 SQLite, `SO_ALLOWED_ORIGINS` 기본 로컬 2개).
-- 기본 시연은 버튼 기반 Stable Simulation + DRY_RUN. 기능 추가보다 정합성·검증을 우선한다.
-- 웹캠 실기 경로는 활성 앱으로 맥락을 판정하고, Windows에서는 실제 앱 조작을 관측한다. `--learn`으로 추론을 끄고 재학습할 수 있다. 라벨 Simulation과 실기 관측을 UI·CLI·발표에서 구분한다. swipe 외에 open_palm(정지한 전경 지속)·circle(전경 중심점 누적 회전각)도 이미 계산 중인 MOG2 전경 마스크로 감지하며, 웹 UI와 같은 네 가지 몸짓 어휘를 공유한다.
-- 웹캠 시작은 실제 첫 프레임 수신으로 검증한다. Windows에서는 DirectShow와 Media Foundation을 순서대로 시도하고, 실패한 캡처는 해제한 뒤 다음 방식으로 전환한다. 장치 번호·캡처 방식 수동 선택과 API·키 훅 없이 실행하는 카메라 점검을 지원한다. 장치 오류와 API 오류를 분리하며 프레임은 저장하지 않는다.
-- 웹 UI는 사용자가 시작한 브라우저 카메라 미리보기와 로컬 모션 분석을 지원한다. 권한을 얻은 뒤 실제 비디오 입력 장치를 선택할 수 있으며, 프레임은 `<video>`와 메모리 캔버스에서만 처리하고 API에는 기존 계약의 motion_type·direction·duration_ms·speed·amplitude만 보낸다. swipe·원형 움직임은 로컬 궤적에서, 손바닥 펼치기는 지수평균 배경 대비 정지한 큰 전경 영역의 지속으로 감지하고(speed·amplitude는 swipe·원형에만 동반 — 원형은 반지름·회전속도로 개인차를 반영, 손바닥은 정적 동작이라 미동반), 중지·페이지 종료 시 MediaStream 트랙을 해제한다.
-- 모션 구간의 시작과 끝에서 실측 시간·ROI 기준 속도·진폭을 산출한다. 서버는 실측 embedding을 만들고 최근 승자 관찰의 평균을 기억한다. DB 컬럼 추가 없이 기존 JSON embedding과 feedback/suggestion 시각을 활용한다.
-- 학습 창은 30일·20건으로 제한하고, 승자 변경·거절 후 새 증거·감지 오류 억제를 회귀 테스트한다. 승자 선택 자체가 `recency_half_life_days` 가중합이라(SPEC L-3), raw count가 더 많아도 오래된 습관이 최근 새 습관에게 밀릴 수 있다 — 증거 총량(observation_count)·threshold 게이트는 raw count 그대로다. 유사도 점수는 SPEC I-2를 따르며 같은 키라도 개인 모션이 다르면 실행을 보류한다.
-- 의도적 단순화: [app.js](frontend/app.js)는 SSE 대신 3초 폴링, 실행 오버레이 자동 닫힘 없음; [action_executor.py](backend/src/silent_orchestra/services/action_executor.py)는 활성 창 이름 부분 문자열 매칭·리눅스 활성 창 미지원; [models.py](backend/src/silent_orchestra/models.py)의 `Annotated` 컬럼 별칭은 유지한다.
+백엔드는 `backend/src/silent_orchestra/`의 `routers/`·`services/` 두 계층, 프런트는 빌드 없는 `frontend/` HTML/CSS/JS입니다.
 
-## 단계별 계획
-
-1. 발표자가 [대본](docs/demo-script.md)을 소리 내어 읽으며 타이밍을 측정한다. UI 조작 외 내레이션은 사람의 리허설로 검증한다.
-2. 선택 경로를 시연할 때만 [운영 가이드](docs/operations.md)에 따라 발표 PC의 OS 실행을 확인하거나 웹캠 인식 품질을 확인한다.
-3. 조건을 충족할 때만 확장한다.
-
-| 확장 | 착수 조건 / 로드맵 |
+| 책임 | 백엔드 경로 |
 |---|---|
-| 동적 학습 임계값 | 실사용 로그로 오작동 비용 측정 가능 |
-| 학습형 embedding·유사도 | 개인 편차에서 단순 코사인 오분류 발생 / V1 |
-| browser·kitchen 등 맥락 추가 | 두 맥락 데모 검증 후, SPEC의 카탈로그·CHECK 변경 준수 / V2 |
-| LLM Intent, 인증·다중 사용자 | 규칙 카탈로그로 요구 표현 불가, 또는 demo-user 단일 사용자 전제 변경 / V3 |
-| SSE·WebSocket | 사용자·탭 증가로 3초 폴링 부족 |
-| PostgreSQL | 단일 PC 데모 범위 초과 |
-| 오버레이 자동 닫힘 | 데모에서 상시 사용으로 전환 |
-| 활성 창 판정 고도화 | 앱 이름 중복 오탐 또는 리눅스 OS 실행 필요 |
+| API·맥락 | `routers/agent.py`, `services/context_resolver.py` |
+| 학습·승인 | `services/pattern_learning.py`, `services/confirmation.py` |
+| 특징·추론 | `services/gesture_encoder.py`, `services/intent_reasoner.py` |
+| 실행·피드백 | `services/action_executor.py`, `services/feedback_service.py` |
+| 실제 키 관측 | `services/input_observer.py` |
+| 초기화 | `routers/demo.py`, `services/demo_service.py` |
+| 데이터·설정 | `models.py`, `schemas.py`, `database.py`, `config.py` |
+
+- 카메라: `frontend/app.js`, `backend/scripts/webcam_gesture_client.py`.
+- DB: 기본 SQLite, 배포 시 `SO_DATABASE_URL`로 PostgreSQL 지정. Vercel 진입점은 루트 `main.py`.
+- 데이터: 사용자·맥락·관찰·행동·패턴·제안·실행·피드백. 컬럼·제약은 [schema.sql](backend/sql/schema.sql), API 스키마는 실행 서버의 `/docs` 참조.
+- `space`·`device`는 메타데이터이며 `activity`가 학습 단위. `speed`·`amplitude`는 함께 NULL이거나 함께 값이 있어야 합니다.
+
+### UI 규칙
+
+값은 [tokens.css](frontend/tokens.css)에서 관리합니다.
+
+- 데스크톱은 맥락·작업·기억 3열, 모바일은 작업 우선. 단일 레이어·얇은 구분선을 사용합니다.
+- 장식 구체·동심원·그라데이션·홍보 문구는 제외하고 Orb는 작은 상태 표시로 제한합니다.
+- cyan은 주 동작(화면 5% 미만), violet은 학습·제안, error는 오류에 사용하며 색만으로 상태를 전달하지 않습니다.
+- 제목은 IBM Plex Sans KR 700, 본문은 Pretendard Variable 400–600, Mono는 wordmark·실시간 지표에만 사용합니다.
+- 모션은 버튼 press·상태 crossfade만 사용하고 reduced motion은 opacity 120ms 이하로 제한합니다. 포커스 표시·44px 이상 터치 영역을 유지합니다.
+- 주 버튼은 solid cyan·한국어 동사, 보조 버튼은 어두운 표면·선, 삭제 버튼은 error 텍스트만 사용합니다.
+- 성공 토스트는 생략하고 오류·화면 밖 비동기 결과는 고정 안내합니다.
+
+## 실행 설정
+
+기본 설치·실행은 [README](README.md#시작하기)를 따릅니다.
+
+### 웹캠
+
+```bash
+python -m pip install -e "./backend[camera]"
+# 서버 실행 후 별도 터미널에서 Windows 실제 키 관측
+python backend/scripts/webcam_gesture_client.py --learn
+# 첫 프레임 점검
+python backend/scripts/webcam_gesture_client.py --check-camera --camera 0
+# Windows 관측을 사용할 수 없는 경우 명시적 라벨 입력
+python backend/scripts/webcam_gesture_client.py --input-mode labels --activity presentation --learn
+```
+
+- 기본 옵션: `--input-mode observe --activity auto`. 원래 키 입력은 차단하지 않으며 수정키 조합은 관측에서 제외합니다.
+- PowerPoint Slide Show: Right/PageDown/N/Space는 다음, Left/PageUp/P는 이전, Escape는 종료. 편집 화면은 제외합니다.
+- Spotify/VLC/iTunes/Music: Media Next/Previous/PlayPause만 관측하며 일반 Space는 제외합니다.
+- 라벨 모드: N/B는 다음·이전, music의 Space는 재생·일시정지. 실제 앱 조작은 관측·수행하지 않습니다.
+- 장치 진단: `--camera INDEX`, `--camera-backend dshow|msmf|default`.
+
+### OS 실행
+
+```bash
+python -m pip install pyautogui
+export SO_ENABLE_OS_ACTIONS=true  # PowerShell: $env:SO_ENABLE_OS_ACTIONS = "true"
+python run_demo.py
+```
+
+설정은 서버 시작 시 읽습니다. `SO_REQUIRE_ACTIVE_WINDOW=true`가 기본입니다. macOS는 접근성 권한이 필요하며 Windows는 활성 창 제목으로 판정합니다. Linux는 활성 창 확인을 지원하지 않습니다. OS 실행을 끄려면 환경 변수를 false로 바꾸고 서버를 재시작합니다.
 
 ## 검증 전략
 
-- [test_api.py](backend/tests/test_api.py)의 프레임 거부, 학습→승인→실행, 맥락 분기, 비활성 창 차단, 초기화→재학습 테스트로 [완료 기준](spec.md#완료-기준)을 확인한다.
-- [README 테스트](README.md#테스트)의 명령으로 [CI](.github/workflows/ci.yml)와 같은 검증을 수행하고, 결과는 TASKS에 기록한다.
+자동 검증 명령은 [README 테스트](README.md#테스트)를 따릅니다.
 
-- 초기화 후 [발표 대본](docs/demo-script.md)의 조작·내레이션을 리허설한다.
+| 대상 | 확인 항목 |
+|---|---|
+| API·SQL | 미정의 영상 필드 거부, `frame_stored=0`, 이미지/BLOB 컬럼 부재, 모션 특징 저장 계약 |
+| 학습·실행 | 승인 전 실행 금지, 맥락 분기, 활성 창 차단, SPEC의 임계값·피드백 규칙 |
+| 초기화 | 7개 종속 테이블 삭제 건수, 다른 사용자 보존, 재생성·commit 실패 롤백, 초기화 후 3회 학습·재제안 |
+| UI | 3초 갱신·요청 병합, 편집 보존, 오류 표시·복구, 외부 학습 진행률, 실행 결과·피드백, dialog 비차단, Reset 복구 |
+| 카메라 | 방향·특징·payload·맥락·키 연결, 실패 시 자원 해제, 정지 제외, 손바닥 재무장, 완전한 원형 궤적 |
 
-## 리스크 및 미결정
+## 남은 과제
 
-- 웹캠 품질은 조명·배경·프레임률에 좌우된다. 기본 시뮬레이션 경로를 유지한다.
-- OS 실행은 발표 PC의 권한·활성 창 확인 지원에 좌우된다. 환경별 제약과 대응은 [운영 가이드](docs/operations.md#권한과-활성-창-확인)에서 관리한다.
-- 실측 embedding은 고정 특징 인코더이며 신경망 학습·신원 인식이 아니다. 좌우 swipe 어휘, 초기 반복 비용, 승인·피드백 조작은 남는다. 개인차 분류 성능과 실제 키 훅은 하드웨어 검증이 필요하다.
+실제 장비에서 별도로 확인합니다.
+
+- Python·브라우저 카메라의 네 몸짓 인식과 성공·오탐·미탐 기록.
+- 브라우저 장치 전환, 중지·페이지 종료 시 MediaStream 해제.
+- 네트워크 요청 캡처에서 이미지·원본 프레임 전송 0건 확인. 정책 API·UI 문구로 대체하지 않습니다.
+- Windows 실제 키 관측 → 제안 → 승인 → 재인식 E2E.
+- OS 실행을 사용할 PC의 권한·활성 창·키 매핑 확인.
